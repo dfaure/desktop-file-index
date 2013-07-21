@@ -31,6 +31,7 @@ struct dfi_id_list
 struct dfi_string_list
 {
   dfi_uint16 n_strings;
+  dfi_uint16 padding;
   dfi_string strings[1];
 };
 
@@ -51,23 +52,29 @@ struct dfi_text_index
   struct dfi_text_index_item items[1];
 };
 
-struct dfi_desktop_file
+struct dfi_keyfile
 {
   dfi_uint16 n_groups;
   dfi_uint16 n_items;
 };
 
-struct dfi_desktop_group
+struct dfi_keyfile_group
 {
   dfi_id     name_id;
   dfi_uint16 items_index;
 };
 
-struct dfi_desktop_item
+struct dfi_keyfile_item
 {
   dfi_id     key_id;
   dfi_id     locale_id;
   dfi_string value;
+};
+
+struct dfi_pointer_array
+{
+  dfi_pointer associated_string_list;
+  dfi_pointer pointers[1];
 };
 
 struct dfi_header

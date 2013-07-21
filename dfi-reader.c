@@ -19,48 +19,73 @@
  * Authors: Ryan Lortie <desrt@desrt.ca>
  */
 
-#include "common.h"
+#include "dfi-reader.h"
 
 #include <string.h>
+#include <stdlib.h>
 
-/* DesktopFileIndex struct {{{1 */
-typedef struct
+/* struct dfi_index struct {{{1 */
+struct dfi_index
 {
-  GBytes                       *bytes;
-  const gchar                  *data;
-  guint                         file_size;
+  const char                   *data;
+  guint32                       file_size;
 
   const struct dfi_string_list *app_names;
   const struct dfi_string_list *key_names;
   const struct dfi_string_list *locale_names;
   const struct dfi_string_list *group_names;
 
-  const dfi_pointer            *implementors;    /* id lists, associated with group_names */
-  const dfi_pointer            *text_indexes;    /* text indexes, associated with locale_names */
-  const dfi_pointer            *desktop_files;   /* desktop files, associated with app_names */
+  const struct dfi_pointer_array *implementors;    /* id lists, associated with group_names */
+  const struct dfi_pointer_array            *text_indexes;    /* text indexes, associated with locale_names */
+  const struct dfi_pointer_array            *desktop_files;   /* desktop files, associated with app_names */
 
   const struct dfi_text_index  *mime_types;
-} DesktopFileIndex;
+
+  GDestroyNotify                notify;
+  gpointer                      notify_data;
+};
 
 /* dfi_uint16, dfi_uint32 {{{1 */
 
-static guint
+guint
 dfi_uint16_get (dfi_uint16 value)
 {
   return GUINT16_FROM_LE (value.le);
 }
 
-static guint
+guint
 dfi_uint32_get (dfi_uint32 value)
 {
   return GUINT32_FROM_LE (value.le);
 }
 
-/* dfi_pointer {{{1 */
+/* dfi_string {{{1 */
+
+static gboolean
+dfi_string_is_flagged (dfi_string string)
+{
+  return (dfi_uint32_get(string.offset) & (1u << 31)) != 0;
+}
+
+static const gchar *
+dfi_string_get (const struct dfi_index *dfi,
+                dfi_string              string)
+{
+  guint32 offset = dfi_uint32_get (string.offset);
+
+  offset &= ~(1u << 31);
+
+  if (offset < dfi->file_size)
+    return dfi->data + offset;
+  else
+    return "";
+}
+
+/* dfi_pointer, dfi_pointer_array {{{1 */
 static gconstpointer
-dfi_pointer_dereference (const DesktopFileIndex *dfi,
+dfi_pointer_dereference (const struct dfi_index *dfi,
                          dfi_pointer             pointer,
-                         gint                    min_size)
+                         guint                   min_size)
 {
   guint offset = dfi_uint32_get (pointer.offset);
 
@@ -75,43 +100,84 @@ dfi_pointer_dereference (const DesktopFileIndex *dfi,
   return dfi->data + offset;
 }
 
-/* dfi_string {{{1 */
-
-static gboolean
-dfi_string_is_flagged (dfi_string string)
+static gconstpointer
+dfi_pointer_dereference_unchecked (const struct dfi_index *dfi,
+                                   dfi_pointer             pointer)
 {
-  return (dfi_uint32_get(string.offset) & (1u << 31)) != 0;
+  guint offset = dfi_uint32_get (pointer.offset);
+
+  return dfi->data + offset;
 }
 
-static const gchar *
-dfi_string_get (const DesktopFileIndex *dfi,
-                dfi_string              string)
+const struct dfi_pointer_array *
+dfi_pointer_array_from_pointer (const struct dfi_index *dfi,
+                                dfi_pointer             pointer)
 {
-  guint32 offset = dfi_uint32_get (string.offset);
+  const struct dfi_pointer_array *array;
+  const struct dfi_string_list *keys;
+  guint need_size;
 
-  offset &= ~(1u << 31);
+  need_size = sizeof (dfi_pointer);
 
-  if (offset < dfi->file_size)
-    return dfi->data + offset;
-  else
-    return "";
+  array = dfi_pointer_dereference (dfi, pointer, need_size);
+  if (array == NULL)
+    return NULL;
+
+  keys = dfi_string_list_from_pointer (dfi, array->associated_string_list);
+  if (keys == NULL)
+    return NULL;
+
+  /* string list length is 16bit, so no overflow danger */
+  need_size += sizeof (dfi_pointer) * dfi_string_list_get_length (keys);
+
+  return dfi_pointer_dereference (dfi, pointer, need_size);
+}
+
+guint
+dfi_pointer_array_get_length (const struct dfi_pointer_array *array,
+                              const struct dfi_index         *dfi)
+{
+  const struct dfi_string_list *keys;
+
+  keys = dfi_pointer_dereference_unchecked (dfi, array->associated_string_list);
+
+  return dfi_uint16_get (keys->n_strings);
+}
+
+const gchar *
+dfi_pointer_array_get_item_key (const struct dfi_pointer_array *array,
+                                const struct dfi_index         *dfi,
+                                gint                            i)
+{
+  const struct dfi_string_list *keys;
+
+  keys = dfi_pointer_dereference_unchecked (dfi, array->associated_string_list);
+
+  return dfi_string_get (dfi, keys->strings[i]);
+}
+
+dfi_pointer
+dfi_pointer_array_get_pointer (const struct dfi_pointer_array *array,
+                               gint                            i)
+{
+  return array->pointers[i];
 }
 
 /* dfi_id, dfi_id_list {{{1 */
 
-static gboolean
+gboolean
 dfi_id_valid (dfi_id id)
 {
   return dfi_uint16_get (id) != 0xffff;
 }
 
-static guint
+guint
 dfi_id_get (dfi_id id)
 {
   return dfi_uint16_get (id);
 }
 
-static const dfi_id *
+const dfi_id *
 dfi_id_list_get_ids (const struct dfi_id_list *list,
                      gint                     *n_ids)
 {
@@ -126,8 +192,8 @@ dfi_id_list_get_ids (const struct dfi_id_list *list,
   return list->ids;
 }
 
-static const struct dfi_id_list *
-dfi_id_list_from_pointer (const DesktopFileIndex *dfi,
+const struct dfi_id_list *
+dfi_id_list_from_pointer (const struct dfi_index *dfi,
                           dfi_pointer             pointer)
 {
   const struct dfi_id_list *list;
@@ -148,8 +214,8 @@ dfi_id_list_from_pointer (const DesktopFileIndex *dfi,
 
 /* dfi_string_list {{{1 */
 
-static const struct dfi_string_list *
-dfi_string_list_from_pointer (const DesktopFileIndex *dfi,
+const struct dfi_string_list *
+dfi_string_list_from_pointer (const struct dfi_index *dfi,
                               dfi_pointer             pointer)
 {
   const struct dfi_string_list *list;
@@ -168,8 +234,8 @@ dfi_string_list_from_pointer (const DesktopFileIndex *dfi,
   return dfi_pointer_dereference (dfi, pointer, need_size);
 }
 
-static gint
-dfi_string_list_binary_search (const DesktopFileIndex       *dfi,
+gint
+dfi_string_list_binary_search (const struct dfi_index       *dfi,
                                const struct dfi_string_list *list,
                                const gchar                  *string)
 {
@@ -198,14 +264,14 @@ dfi_string_list_binary_search (const DesktopFileIndex       *dfi,
   return -1;
 }
 
-static guint
+guint
 dfi_string_list_get_length (const struct dfi_string_list *list)
 {
   return dfi_uint16_get (list->n_strings);
 }
 
-static const gchar *
-dfi_string_list_get_string (const DesktopFileIndex       *dfi,
+const gchar *
+dfi_string_list_get_string (const struct dfi_index       *dfi,
                             const struct dfi_string_list *list,
                             dfi_id                        id)
 {
@@ -214,24 +280,19 @@ dfi_string_list_get_string (const DesktopFileIndex       *dfi,
   if (list == NULL)
     return NULL;
 
+  if (i == 0xffff)
+    return NULL;
+
   if (i < dfi_uint16_get (list->n_strings))
     return dfi_string_get (dfi, list->strings[i]);
   else
     return "";
 }
 
-static const dfi_pointer *
-dfi_string_list_get_associated_pointer_array (const DesktopFileIndex       *dfi,
-                                              const struct dfi_string_list *list,
-                                              dfi_pointer                   pointer)
-{
-  return dfi_pointer_dereference (dfi, pointer, sizeof (dfi_pointer) * dfi_string_list_get_length (list));
-}
-
 /* dfi_text_index, dfi_text_index_item {{{1 */
 
-static const struct dfi_text_index *
-dfi_text_index_from_pointer (const DesktopFileIndex *dfi,
+const struct dfi_text_index *
+dfi_text_index_from_pointer (const struct dfi_index *dfi,
                              dfi_pointer             pointer)
 {
   const struct dfi_text_index *text_index;
@@ -255,8 +316,8 @@ dfi_text_index_from_pointer (const DesktopFileIndex *dfi,
   return dfi_pointer_dereference (dfi, pointer, need_size);
 }
 
-static const gchar *
-dfi_text_index_get_string (const DesktopFileIndex      *dfi,
+const gchar *
+dfi_text_index_get_string (const struct dfi_index      *dfi,
                            const struct dfi_text_index *text_index,
                            dfi_id                       id)
 {
@@ -271,8 +332,8 @@ dfi_text_index_get_string (const DesktopFileIndex      *dfi,
     return "";
 }
 
-static const struct dfi_text_index_item *
-dfi_text_index_binary_search (const DesktopFileIndex      *dfi,
+const struct dfi_text_index_item *
+dfi_text_index_binary_search (const struct dfi_index      *dfi,
                               const struct dfi_text_index *text_index,
                               const gchar                 *string)
 {
@@ -304,8 +365,8 @@ dfi_text_index_binary_search (const DesktopFileIndex      *dfi,
   return NULL;
 }
 
-static const dfi_id *
-dfi_text_index_item_get_ids (const DesktopFileIndex           *dfi,
+const dfi_id *
+dfi_text_index_item_get_ids (const struct dfi_index           *dfi,
                              const struct dfi_text_index_item *item,
                              gint                             *n_results)
 {
@@ -334,8 +395,8 @@ dfi_text_index_item_get_ids (const DesktopFileIndex           *dfi,
     return dfi_id_list_get_ids (dfi_id_list_from_pointer (dfi, item->value.pointer), n_results);
 }
 
-static const dfi_id *
-dfi_text_index_get_ids_for_exact_match (const DesktopFileIndex      *dfi,
+const dfi_id *
+dfi_text_index_get_ids_for_exact_match (const struct dfi_index      *dfi,
                                         const struct dfi_text_index *index,
                                         const gchar                 *string,
                                         gint                        *n_results)
@@ -347,15 +408,15 @@ dfi_text_index_get_ids_for_exact_match (const DesktopFileIndex      *dfi,
   return dfi_text_index_item_get_ids (dfi, item, n_results);
 }
 
-/* dfi_desktop_file, dfi_desktop_group, dfi_desktop_line {{{1 */
-static const struct dfi_desktop_file *
-dfi_desktop_file_from_pointer (const DesktopFileIndex *dfi,
-                               dfi_pointer             pointer)
+/* dfi_keyfile, dfi_keyfile_group, dfi_keyfile_item {{{1 */
+const struct dfi_keyfile *
+dfi_keyfile_from_pointer (const struct dfi_index *dfi,
+                          dfi_pointer             pointer)
 {
-  const struct dfi_desktop_file *file;
+  const struct dfi_keyfile *file;
   guint need_size;
 
-  need_size = sizeof (struct dfi_desktop_file);
+  need_size = sizeof (struct dfi_keyfile);
 
   file = dfi_pointer_dereference (dfi, pointer, need_size);
 
@@ -363,48 +424,53 @@ dfi_desktop_file_from_pointer (const DesktopFileIndex *dfi,
     return NULL;
 
   /* All sizes 16bit ints, so no overflow danger */
-  need_size += sizeof (struct dfi_desktop_group) * dfi_uint16_get (file->n_groups);
-  need_size += sizeof (struct dfi_desktop_group); /* EOF group */
-  need_size += sizeof (struct dfi_desktop_item) * dfi_uint16_get (file->n_items);
+  need_size += sizeof (struct dfi_keyfile_group) * dfi_uint16_get (file->n_groups);
+  need_size += sizeof (struct dfi_keyfile_item) * dfi_uint16_get (file->n_items);
 
   return dfi_pointer_dereference (dfi, pointer, need_size);
 }
 
-static const struct dfi_desktop_file_group *
-dfi_desktop_file_get_groups (const DesktopFileIndex        *dfi,
-                             const struct dfi_desktop_file *file,
-                             gint                          *n_groups)
+const struct dfi_keyfile_group *
+dfi_keyfile_get_groups (const struct dfi_keyfile *file,
+                        const struct dfi_index   *dfi,
+                        gint                     *n_groups)
 {
   *n_groups = dfi_uint16_get (file->n_groups);
 
-  return G_STRUCT_MEMBER_P (file, sizeof (struct dfi_desktop_file));
+  return G_STRUCT_MEMBER_P (file, sizeof (struct dfi_keyfile));
 }
 
-static const gchar *
-dfi_desktop_file_group_get_name (const DesktopFileIndex         *dfi,
-                                 const struct dfi_desktop_group *group)
+const gchar *
+dfi_keyfile_group_get_name (const struct dfi_keyfile_group *group,
+                            const struct dfi_index         *dfi)
 {
   return dfi_string_list_get_string (dfi, dfi->group_names, group->name_id);
 }
 
-static const struct dfi_desktop_file_item *
-dfi_desktop_file_group_get_items (const DesktopFileIndex         *dfi,
-                                  const struct dfi_desktop_file  *file,
-                                  const struct dfi_desktop_group *group,
-                                  gint                           *n_items)
+const struct dfi_keyfile_item *
+dfi_keyfile_group_get_items (const struct dfi_keyfile_group *group,
+                             const struct dfi_index         *dfi,
+                             const struct dfi_keyfile       *file,
+                             gint                           *n_items)
 {
   guint start, end;
+  guint n_groups;
 
   start = dfi_uint16_get (group->items_index);
-  end = dfi_uint16_get (group[1].items_index);
+
+  G_STATIC_ASSERT (sizeof (struct dfi_keyfile_group) == sizeof (struct dfi_keyfile));
+  n_groups = dfi_uint16_get (file->n_groups);
+  if ((gpointer) (file + n_groups) == (gpointer) group)
+    end = dfi_uint16_get (file->n_items);
+  else
+    end = dfi_uint16_get (group[1].items_index);
 
   if (start <= end && end <= dfi_uint16_get (file->n_items))
     {
       *n_items = end - start;
-      return G_STRUCT_MEMBER_P (file, sizeof (struct dfi_desktop_file) +
-                                      sizeof (struct dfi_desktop_group) * dfi_uint16_get (file->n_groups) +
-                                      sizeof (struct dfi_desktop_group) +
-                                      start);
+      return G_STRUCT_MEMBER_P (file, sizeof (struct dfi_keyfile) +
+                                      sizeof (struct dfi_keyfile_group) * dfi_uint16_get (file->n_groups) +
+                                      sizeof (struct dfi_keyfile_item) * start);
     }
   else
     {
@@ -413,23 +479,23 @@ dfi_desktop_file_group_get_items (const DesktopFileIndex         *dfi,
     }
 }
 
-static const gchar *
-dfi_desktop_file_item_get_key (const DesktopFileIndex        *dfi,
-                               const struct dfi_desktop_item *item)
+const gchar *
+dfi_keyfile_item_get_key (const struct dfi_keyfile_item *item,
+                          const struct dfi_index        *dfi)
 {
   return dfi_string_list_get_string (dfi, dfi->key_names, item->key_id);
 }
 
-static const gchar *
-dfi_desktop_file_item_get_locale (const DesktopFileIndex        *dfi,
-                                  const struct dfi_desktop_item *item)
+const gchar *
+dfi_keyfile_item_get_locale (const struct dfi_keyfile_item *item,
+                             const struct dfi_index        *dfi)
 {
   return dfi_string_list_get_string (dfi, dfi->locale_names, item->locale_id);
 }
 
-static const gchar *
-dfi_desktop_file_item_get_value (const DesktopFileIndex        *dfi,
-                                 const struct dfi_desktop_item *item)
+const gchar *
+dfi_keyfile_item_get_value (const struct dfi_keyfile_item *item,
+                            const struct dfi_index        *dfi)
 {
   return dfi_string_get (dfi, item->value);
 }
@@ -437,27 +503,42 @@ dfi_desktop_file_item_get_value (const DesktopFileIndex        *dfi,
 /* dfi_header {{{1 */
 
 const struct dfi_header *
-dfi_header_get (const DesktopFileIndex *dfi)
+dfi_header_get (const struct dfi_index *dfi)
 {
   dfi_pointer ptr = { };
 
   return dfi_pointer_dereference (dfi, ptr, sizeof (struct dfi_header));
 }
 
-/* DesktopFileIndex implementation {{{1 */
+/* struct dfi_index implementation {{{1 */
 
-DesktopFileIndex *
-desktop_file_index_new (GBytes *bytes)
+void
+dfi_index_free (struct dfi_index *dfi)
+{
+  if (dfi->notify)
+    (* dfi->notify) (dfi->notify_data);
+
+  free (dfi);
+}
+
+
+struct dfi_index *
+dfi_index_new (gconstpointer  data,
+               gsize          size,
+               GDestroyNotify notify,
+               gpointer       notify_data)
 {
   const struct dfi_header *header;
-  DesktopFileIndex *dfi;
-  gsize size;
+  struct dfi_index *dfi;
 
-  dfi = g_slice_new (DesktopFileIndex);
-  dfi->data = g_bytes_get_data (bytes, &size);
-  if (size > G_MAXINT)
-    goto err;
+  dfi = malloc (sizeof (struct dfi_index));
+  dfi->data = data;
   dfi->file_size = size;
+  dfi->notify = notify;
+  dfi->notify_data = notify_data;
+
+  if (dfi->file_size > G_MAXINT)
+    goto err;
 
   header = dfi_header_get (dfi);
   if (!header)
@@ -471,21 +552,25 @@ desktop_file_index_new (GBytes *bytes)
   if (!dfi->app_names || !dfi->key_names || !dfi->locale_names || !dfi->group_names)
    goto err;
 
-  dfi->implementors = dfi_string_list_get_associated_pointer_array (dfi, dfi->group_names, header->implementors);
-  dfi->text_indexes = dfi_string_list_get_associated_pointer_array (dfi, dfi->locale_names, header->text_indexes);
-  dfi->desktop_files = dfi_string_list_get_associated_pointer_array (dfi, dfi->app_names, header->desktop_files);
+  dfi->implementors = dfi_pointer_array_from_pointer (dfi, header->implementors);
+  dfi->text_indexes = dfi_pointer_array_from_pointer (dfi, header->text_indexes);
+  dfi->desktop_files = dfi_pointer_array_from_pointer (dfi, header->desktop_files);
   dfi->mime_types = dfi_text_index_from_pointer (dfi, header->mime_types);
 
-  if (!dfi->mime_types || !dfi->implementors || !dfi->text_indexes || !dfi->desktop_files)
-    goto err;
-
-  dfi->bytes = g_bytes_ref (bytes);
+ // if (!dfi->mime_types || !dfi->implementors || !dfi->text_indexes || !dfi->desktop_files)
+   // goto err;
 
   return dfi;
 
 err:
-  g_slice_free (DesktopFileIndex, dfi);
+  dfi_index_free (dfi);
   return NULL;
+}
+
+const struct dfi_pointer_array *
+dfi_index_get_desktop_files (const struct dfi_index *dfi)
+{
+  return dfi->desktop_files;
 }
 
 /* Epilogue {{{1 */
