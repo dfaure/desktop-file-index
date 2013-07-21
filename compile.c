@@ -157,8 +157,6 @@ desktop_file_index_builder_write_id (DesktopFileIndexBuilder *builder,
   value = g_hash_table_lookup (string_list, string);
   g_assert (((void *) (gsize) (guint16) (gsize) value) == value);
 
-  g_print ("id for '%s' is %d\n", string, (gint) (gsize) value);
-
   return desktop_file_index_builder_write_uint16 (builder, (gsize) value);
 }
 
@@ -363,10 +361,55 @@ desktop_file_index_builder_intern (DesktopFileIndexBuilder *builder,
   g_hash_table_insert (builder->string_table, g_strdup (string), NULL);
 }
 
+static void
+desktop_file_index_builder_add_strings (DesktopFileIndexBuilder *builder)
+{
+  GHashTableIter keyfile_iter;
+  gpointer key, val;
+
+  g_hash_table_iter_init (&keyfile_iter, builder->desktop_files);
+  while (g_hash_table_iter_next (&keyfile_iter, &key, &val))
+    {
+      DesktopFileIndexKeyfile *kf = val;
+      const gchar *app = key;
+      gint i;
+
+      // g_print ("app: %s\n", app);
+      desktop_file_index_builder_intern (builder, builder->app_names, app);
+
+      for (i = 0; i < kf->groups->len; i++)
+        {
+          DesktopFileIndexKeyfileGroup *group = kf->groups->pdata[i];
+          gint end;
+          gint j;
+
+          if (i < kf->groups->len - 1)
+            end = ((DesktopFileIndexKeyfileGroup *) kf->groups->pdata[i + 1])->start;
+          else
+            end = kf->items->len;
+
+          desktop_file_index_builder_intern (builder, builder->group_names, group->name);
+
+          // g_print ("[%s]\n", group->name);
+
+          for (j = group->start; j < end; j++)
+            {
+              DesktopFileIndexKeyfileItem *item = kf->items->pdata[j];
+
+              desktop_file_index_builder_intern (builder, builder->key_names, item->key);
+              desktop_file_index_builder_intern (builder, builder->locale_names, item->locale);
+              desktop_file_index_builder_intern (builder, NULL, item->value);
+
+              // g_print ("%s[%s]=%s\n", item->key, item->locale, item->value);
+            }
+        }
+
+    }
+}
+
 static DesktopFileIndexKeyfile *
-desktop_file_index_keyfile_new (DesktopFileIndexBuilder  *builder,
-                                const gchar              *filename,
-                                GError                  **error)
+desktop_file_index_keyfile_new (const gchar  *filename,
+                                GError      **error)
 {
   DesktopFileIndexKeyfile *kf;
   gchar *contents;
@@ -410,7 +453,6 @@ desktop_file_index_keyfile_new (DesktopFileIndexBuilder  *builder,
           kfg->name = g_strndup (c + 1, group_size);
           kfg->start = kf->items->len;
 
-          desktop_file_index_builder_intern (builder, builder->group_names, kfg->name);
           g_ptr_array_add (kf->groups, kfg);
         }
 
@@ -457,10 +499,6 @@ desktop_file_index_keyfile_new (DesktopFileIndexBuilder  *builder,
           kfi->locale = g_strndup (locale, locale_size);
           kfi->value = g_strndup (value, value_size);
 
-          desktop_file_index_builder_intern (builder, builder->key_names, kfi->key);
-          desktop_file_index_builder_intern (builder, builder->locale_names, kfi->locale);
-          desktop_file_index_builder_intern (builder, NULL, kfi->value);
-
           g_ptr_array_add (kf->items, kfi);
         }
 
@@ -502,11 +540,9 @@ desktop_file_index_builder_add_desktop_file (DesktopFileIndexBuilder  *builder,
 {
   DesktopFileIndexKeyfile *kf;
 
-  kf = desktop_file_index_keyfile_new (builder, filename, error);
+  kf = desktop_file_index_keyfile_new (filename, error);
   if (!kf)
     return FALSE;
-
-  desktop_file_index_builder_intern (builder, builder->app_names, desktop_id);
 
   g_hash_table_insert (builder->desktop_files, g_strdup (desktop_id), kf);
 
@@ -536,9 +572,15 @@ main (int argc, char **argv)
       desktop_file_index_builder_add_desktop_file (builder, name, fullname, &error);
       g_free (fullname);
 
-      g_assert_no_error (error);
+      if (error)
+        {
+          g_printerr ("%s\n", error->message);
+          g_clear_error (&error);
+        }
     }
   g_dir_close (dir);
+
+  desktop_file_index_builder_add_strings (builder);
 
   desktop_file_index_builder_serialise (builder);
 
