@@ -6,6 +6,7 @@ main (void)
 {
   GError *error = NULL;
   struct dfi_index *dfi;
+  const struct dfi_string_list *locales;
   const struct dfi_pointer_array *dfs;
   GMappedFile *mf;
   gint i, n;
@@ -20,6 +21,13 @@ main (void)
                        (GDestroyNotify) g_mapped_file_unref,
                        mf);
   g_assert (dfi);
+
+  locales = dfi_index_get_locale_names (dfi);
+  g_print ("%d locales\n", dfi_string_list_get_length (locales));
+  n = dfi_string_list_get_length (locales);
+  for (i = 0; i < n; i++)
+    g_print ("  %s\n", dfi_string_list_get_string_at_index (locales, dfi, i));
+  g_print ("\n\n");
 
   dfs = dfi_index_get_desktop_files (dfi);
   g_assert (dfs);

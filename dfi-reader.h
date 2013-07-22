@@ -58,14 +58,18 @@ const struct dfi_id_list *              dfi_id_list_from_pointer                
 
 const struct dfi_string_list *          dfi_string_list_from_pointer                    (const struct dfi_index           *index,
                                                                                          dfi_pointer                       pointer);
-gint                                    dfi_string_list_binary_search                   (const struct dfi_index           *index,
-                                                                                         const struct dfi_string_list     *list,
+gint                                    dfi_string_list_binary_search                   (const struct dfi_string_list     *list,
+                                                                                         const struct dfi_index           *index,
                                                                                          const gchar                      *string);
 guint                                   dfi_string_list_get_length                      (const struct dfi_string_list     *list);
 
-const gchar *                           dfi_string_list_get_string                      (const struct dfi_index           *dfi,
-                                                                                         const struct dfi_string_list     *list,
+const gchar *                           dfi_string_list_get_string                      (const struct dfi_string_list     *list,
+                                                                                         const struct dfi_index           *dfi,
                                                                                          dfi_id                            id);
+
+const gchar *                           dfi_string_list_get_string_at_index             (const struct dfi_string_list     *list,
+                                                                                         const struct dfi_index           *dfi,
+                                                                                         gint                              i);
 
 const struct dfi_text_index *           dfi_text_index_from_pointer                     (const struct dfi_index           *dfi,
                                                                                          dfi_pointer                       pointer);

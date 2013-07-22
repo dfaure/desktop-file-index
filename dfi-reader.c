@@ -235,8 +235,8 @@ dfi_string_list_from_pointer (const struct dfi_index *dfi,
 }
 
 gint
-dfi_string_list_binary_search (const struct dfi_index       *dfi,
-                               const struct dfi_string_list *list,
+dfi_string_list_binary_search (const struct dfi_string_list *list,
+                               const struct dfi_index       *dfi,
                                const gchar                  *string)
 {
   guint l, r;
@@ -271,8 +271,16 @@ dfi_string_list_get_length (const struct dfi_string_list *list)
 }
 
 const gchar *
-dfi_string_list_get_string (const struct dfi_index       *dfi,
-                            const struct dfi_string_list *list,
+dfi_string_list_get_string_at_index (const struct dfi_string_list *list,
+                                     const struct dfi_index       *dfi,
+                                     gint                          i)
+{
+  return dfi_string_get (dfi, list->strings[i]);
+}
+
+const gchar *
+dfi_string_list_get_string (const struct dfi_string_list *list,
+                            const struct dfi_index       *dfi,
                             dfi_id                        id)
 {
   gint i = dfi_id_get (id);
@@ -284,7 +292,7 @@ dfi_string_list_get_string (const struct dfi_index       *dfi,
     return NULL;
 
   if (i < dfi_uint16_get (list->n_strings))
-    return dfi_string_get (dfi, list->strings[i]);
+    return dfi_string_list_get_string_at_index (list, dfi, i);
   else
     return "";
 }
@@ -444,7 +452,7 @@ const gchar *
 dfi_keyfile_group_get_name (const struct dfi_keyfile_group *group,
                             const struct dfi_index         *dfi)
 {
-  return dfi_string_list_get_string (dfi, dfi->group_names, group->name_id);
+  return dfi_string_list_get_string (dfi->group_names, dfi, group->name_id);
 }
 
 const struct dfi_keyfile_item *
@@ -483,14 +491,14 @@ const gchar *
 dfi_keyfile_item_get_key (const struct dfi_keyfile_item *item,
                           const struct dfi_index        *dfi)
 {
-  return dfi_string_list_get_string (dfi, dfi->key_names, item->key_id);
+  return dfi_string_list_get_string (dfi->key_names, dfi, item->key_id);
 }
 
 const gchar *
 dfi_keyfile_item_get_locale (const struct dfi_keyfile_item *item,
                              const struct dfi_index        *dfi)
 {
-  return dfi_string_list_get_string (dfi, dfi->locale_names, item->locale_id);
+  return dfi_string_list_get_string (dfi->locale_names, dfi, item->locale_id);
 }
 
 const gchar *
@@ -571,6 +579,30 @@ const struct dfi_pointer_array *
 dfi_index_get_desktop_files (const struct dfi_index *dfi)
 {
   return dfi->desktop_files;
+}
+
+const struct dfi_string_list *
+dfi_index_get_app_names (const struct dfi_index *dfi)
+{
+  return dfi->app_names;
+}
+
+const struct dfi_string_list *
+dfi_index_get_key_names (const struct dfi_index *dfi)
+{
+  return dfi->key_names;
+}
+
+const struct dfi_string_list *
+dfi_index_get_locale_names (const struct dfi_index *dfi)
+{
+  return dfi->locale_names;
+}
+
+const struct dfi_string_list *
+dfi_index_get_group_names (const struct dfi_index *dfi)
+{
+  return dfi->group_names;
 }
 
 /* Epilogue {{{1 */

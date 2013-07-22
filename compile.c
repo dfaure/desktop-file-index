@@ -1,20 +1,50 @@
 #include "common.h"
 
+#include "dfi-builder-string-table.h"
+#include "dfi-builder-keyfile.h"
+#include "dfi-builder-text-index.h"
+#include "dfi-builder-string-list.h"
+#include "dfi-builder-id-list.h"
+
 #include <string.h>
 #include <unistd.h>
+#include <locale.h>
 
 typedef struct
 {
-  GHashTable *string_table;
-  GHashTable *key_names;
-  GHashTable *group_names;
-  GHashTable *app_names;
-  GHashTable *locale_names;
+  GHashTable *locale_string_tables;  /* string tables */
 
-  GHashTable *desktop_files;
+  GSequence *key_names;              /* string list */
+  GSequence *group_names;            /* string list */
+  GSequence *app_names;              /* string list */
+  GSequence *locale_names;           /* string list */
 
-  GString    *string;
+  GSequence  *c_text_index;          /* text index */
+  GSequence  *mime_types;            /* text index */
+
+  GHashTable *locale_text_indexes;   /* str -> text index */
+  GHashTable *group_implementors;    /* str -> id list */
+  GHashTable *desktop_files;         /* str -> Keyfile */
+
+  GString    *string;                /* file contents */
 } DesktopFileIndexBuilder;
+
+#define foreach_sequence_item(iter, sequence) \
+  for (iter = g_sequence_get_begin_iter (sequence);                     \
+       !g_sequence_iter_is_end (iter);                                  \
+       iter = g_sequence_iter_next (iter))
+
+#define foreach_sequence_item_and_position(iter, sequence, counter) \
+  for (counter = 0, iter = g_sequence_get_begin_iter (sequence);        \
+       !g_sequence_iter_is_end (iter);                                  \
+       iter = g_sequence_iter_next (iter), counter++)
+
+static GHashTable *
+desktop_file_index_builder_get_string_table (DesktopFileIndexBuilder *builder,
+                                             const gchar             *locale)
+{
+  return desktop_file_index_string_tables_get_table (builder->locale_string_tables, locale);
+}
 
 static guint
 desktop_file_index_builder_get_offset (DesktopFileIndexBuilder *builder)
@@ -76,6 +106,7 @@ desktop_file_index_builder_write_uint32 (DesktopFileIndexBuilder *builder,
   return offset;
 }
 
+#if 0
 static guint
 desktop_file_index_builder_write_raw_string (DesktopFileIndexBuilder *builder,
                                              const gchar             *string)
@@ -87,174 +118,221 @@ desktop_file_index_builder_write_raw_string (DesktopFileIndexBuilder *builder,
 
   return offset;
 }
+XXX
+#endif
 
 static guint
 desktop_file_index_builder_write_string (DesktopFileIndexBuilder *builder,
+                                         const gchar             *from_locale,
                                          const gchar             *string)
 {
-  gpointer offset;
+  guint offset;
 
-  if (string == NULL)
-    return desktop_file_index_builder_write_uint32 (builder, 0);
+  offset = desktop_file_index_string_tables_get_offset (builder->locale_string_tables, from_locale, string);
 
-  offset = g_hash_table_lookup (builder->string_table, string);
-  g_assert (offset != NULL);
-
-  return desktop_file_index_builder_write_uint32 (builder, GPOINTER_TO_UINT (offset));
-}
-
-static gint
-indirect_strcmp (gconstpointer a,
-                 gconstpointer b)
-{
-  const gchar * const *astr = a, * const *bstr = b;
-
-  return strcmp (*astr, *bstr);
+  return desktop_file_index_builder_write_uint32 (builder, offset);
 }
 
 static guint
 desktop_file_index_builder_write_string_list (DesktopFileIndexBuilder *builder,
-                                              GHashTable              *strings)
+                                              GSequence               *strings)
 {
   guint offset = desktop_file_index_builder_get_aligned (builder, sizeof (guint32));
-  GHashTableIter iter;
-  GPtrArray *list;
-  gpointer key;
-  gint i, n;
+  GSequenceIter *iter;
 
-  n = g_hash_table_size (strings);
-  g_assert_cmpint (n, <, 65536);
-  list = g_ptr_array_new ();
-  g_hash_table_iter_init (&iter, strings);
-  while (g_hash_table_iter_next (&iter, &key, NULL))
-    g_ptr_array_add (list, key);
-  g_ptr_array_sort (list, indirect_strcmp);
-  g_assert_cmpint (n, ==, list->len);
-  desktop_file_index_builder_write_uint16 (builder, list->len);
+  desktop_file_index_builder_write_uint16 (builder, g_sequence_get_length (strings));
   desktop_file_index_builder_write_uint16 (builder, 0xffff); /* padding */
-  for (i = 0; i < n; i++)
-    {
-      gpointer ptr;
 
-      g_hash_table_insert (strings, g_strdup (list->pdata[i]), GINT_TO_POINTER (i));
-      ptr = g_hash_table_lookup (builder->string_table, list->pdata[i]);
-      desktop_file_index_builder_write_uint32 (builder, GPOINTER_TO_UINT (ptr));
-    }
+  for (iter = g_sequence_get_begin_iter (strings); !g_sequence_iter_is_end (iter); iter = g_sequence_iter_next (iter))
+    desktop_file_index_builder_write_string (builder, NULL, g_sequence_get (iter));
 
   return offset;
 }
 
 static guint
 desktop_file_index_builder_write_id (DesktopFileIndexBuilder *builder,
-                                     GHashTable              *string_list,
+                                     GSequence               *string_list,
                                      const gchar             *string)
 {
-  gpointer value;
+  GSequenceIter *iter;
+  guint value;
 
   if (string == NULL)
-    return desktop_file_index_builder_write_uint16 (builder, 0xffff);
+    return desktop_file_index_builder_write_uint16 (builder, G_MAXUINT16);
 
-  value = g_hash_table_lookup (string_list, string);
-  g_assert (((void *) (gsize) (guint16) (gsize) value) == value);
+  iter = g_sequence_lookup (string_list, (gpointer) string, (GCompareDataFunc) strcmp, NULL);
+  g_assert (iter != NULL);
+
+  value = g_sequence_iter_get_position (iter);
+  g_assert_cmpuint (value, <, G_MAXUINT16);
 
   return desktop_file_index_builder_write_uint16 (builder, (gsize) value);
 }
 
-typedef struct
-{
-  gchar *key;
-  gchar *locale;
-  gchar *value;
-} DesktopFileIndexKeyfileItem;
-
-typedef struct
-{
-  gchar *name;
-  guint  start;
-} DesktopFileIndexKeyfileGroup;
-
-typedef struct
-{
-  GPtrArray *groups;
-  GPtrArray *items;
-} DesktopFileIndexKeyfile;
-
 static guint
 desktop_file_index_builder_write_keyfile (DesktopFileIndexBuilder *builder,
-                                          gpointer                 user_data)
+                                          const gchar             *app,
+                                          gpointer                 data)
 {
   guint offset = desktop_file_index_builder_get_aligned (builder, sizeof (guint16));
-  DesktopFileIndexKeyfile *keyfile = user_data;
+  DesktopFileIndexKeyfile *keyfile = data;
+  gint n_groups, n_items;
   gint i;
 
-  desktop_file_index_builder_write_uint16 (builder, keyfile->groups->len);
-  desktop_file_index_builder_write_uint16 (builder, keyfile->items->len);
+  n_groups = desktop_file_index_keyfile_get_n_groups (keyfile);
+  n_items = desktop_file_index_keyfile_get_n_items (keyfile);
 
-  for (i = 0; i < keyfile->groups->len; i++)
+  desktop_file_index_builder_write_uint16 (builder, n_groups);
+  desktop_file_index_builder_write_uint16 (builder, n_items);
+
+  for (i = 0; i < n_groups; i++)
     {
-      DesktopFileIndexKeyfileGroup *group = keyfile->groups->pdata[i];
+      const gchar *group_name;
+      guint start;
 
-      desktop_file_index_builder_write_id (builder, builder->group_names, group->name);
-      desktop_file_index_builder_write_uint16 (builder, group->start);
+      group_name = desktop_file_index_keyfile_get_group_name (keyfile, i);
+      desktop_file_index_keyfile_get_group_range (keyfile, i, &start, NULL);
+
+      desktop_file_index_builder_write_id (builder, builder->group_names, group_name);
+      desktop_file_index_builder_write_uint16 (builder, start);
     }
 
-  for (i = 0; i < keyfile->items->len; i++)
+  for (i = 0; i < n_items; i++)
     {
-      DesktopFileIndexKeyfileItem *item = keyfile->items->pdata[i];
+      const gchar *key, *locale, *value;
 
-      desktop_file_index_builder_write_id (builder, builder->key_names, item->key);
-      desktop_file_index_builder_write_id (builder, builder->locale_names, item->locale);
-      desktop_file_index_builder_write_string (builder, item->value);
+      desktop_file_index_keyfile_get_item (keyfile, i, &key, &locale, &value);
+
+      desktop_file_index_builder_write_id (builder, builder->key_names, key);
+      desktop_file_index_builder_write_id (builder, builder->locale_names, locale);
+      desktop_file_index_builder_write_string (builder, locale, value);
     }
 
   return offset;
 }
 
 typedef guint (* DesktopFileIndexBuilderFunc) (DesktopFileIndexBuilder *builder,
-                                               gpointer                 user_data);
+                                               const gchar             *key,
+                                               gpointer                 data);
 
 static guint
 desktop_file_index_builder_write_pointer_array (DesktopFileIndexBuilder     *builder,
-                                                GHashTable                  *key_table,
-                                                guint                        key_table_offset,
+                                                GSequence                   *key_list,
+                                                guint                        key_list_offset,
                                                 GHashTable                  *data_table,
                                                 DesktopFileIndexBuilderFunc  func)
 {
-  GHashTableIter iter;
-  gpointer key, value;
+  GSequenceIter *iter;
   guint *offsets;
+  gint n, i = 0;
   guint offset;
-  gint n, i;
 
-  n = g_hash_table_size (key_table);
-  g_assert_cmpint (n, ==, g_hash_table_size (data_table));
-
+  n = g_sequence_get_length (key_list);
   offsets = g_new0 (guint, n);
 
-  g_hash_table_iter_init (&iter, key_table);
-  while (g_hash_table_iter_next (&iter, &key, &value))
+  for (iter = g_sequence_get_begin_iter (key_list); !g_sequence_iter_is_end (iter); iter = g_sequence_iter_next (iter))
     {
+      const gchar *key = g_sequence_get (iter);
       gpointer data;
 
-      i = GPOINTER_TO_UINT (value);
       data = g_hash_table_lookup (data_table, key);
-      offsets[i] = (* func) (builder, data);
+      offsets[i++] = (* func) (builder, key, data);
     }
+  g_assert (i == n);
 
   offset = desktop_file_index_builder_get_aligned (builder, sizeof (guint32));
-
-  desktop_file_index_builder_write_uint32 (builder, key_table_offset);
+  desktop_file_index_builder_write_uint32 (builder, key_list_offset);
 
   for (i = 0; i < n; i++)
-    {
-      g_assert (offsets[i]);
-      desktop_file_index_builder_write_uint32 (builder, offsets[i]);
-    }
+    desktop_file_index_builder_write_uint32 (builder, offsets[i]);
 
   g_free (offsets);
 
   return offset;
 }
+
+static guint
+desktop_file_index_builder_write_id_list (DesktopFileIndexBuilder *builder,
+                                          const gchar             *key,
+                                          gpointer                 data)
+{
+  GArray *id_list = data;
+  const guint16 *ids;
+  guint offset;
+  guint n_ids;
+  guint i;
+
+  ids = desktop_file_index_id_list_get_ids (id_list, &n_ids);
+
+  offset = desktop_file_index_builder_write_uint16 (builder, n_ids);
+
+  for (i = 0; i < n_ids; i++)
+    desktop_file_index_builder_write_uint16 (builder, ids[i]);
+
+  return offset;
+}
+
+static guint
+desktop_file_index_builder_write_text_index (DesktopFileIndexBuilder *builder,
+                                             const gchar             *key,
+                                             gpointer                 data)
+{
+  GSequence *text_index = data;
+  const gchar *locale = key;
+  GHashTable *string_table;
+  GSequenceIter *iter;
+  const gchar **strings;
+  guint *id_lists;
+  guint offset;
+  guint n_items;
+  guint i;
+
+  string_table = desktop_file_index_builder_get_string_table (builder, locale);
+  if (!desktop_file_index_string_table_is_written (string_table))
+    {
+      GHashTable *c_string_table;
+
+      c_string_table = desktop_file_index_string_tables_get_table (builder->locale_string_tables, NULL);
+      guint start = builder->string->len;
+      desktop_file_index_string_table_write (string_table, c_string_table, builder->string);
+      g_print ("string table for '%s': %d\n", locale, (gint) builder->string->len - start);
+    }
+
+  n_items = g_sequence_get_length (text_index);
+
+  strings = g_new (const gchar *, n_items);
+  id_lists = g_new (guint, n_items);
+
+  desktop_file_index_builder_align (builder, sizeof (guint16));
+
+  foreach_sequence_item_and_position (iter, text_index, i)
+    {
+      GArray *id_list;
+
+      desktop_file_index_text_index_get_item (iter, &strings[i], &id_list);
+      id_lists[i] = desktop_file_index_builder_write_id_list (builder, NULL, id_list);
+    }
+
+  desktop_file_index_builder_align (builder, sizeof (guint32));
+
+  offset = desktop_file_index_builder_get_offset (builder);
+
+  desktop_file_index_builder_write_uint32 (builder, n_items);
+
+  for (i = 0; i < n_items; i++)
+    {
+      desktop_file_index_builder_write_string (builder, locale, strings[i]);
+      desktop_file_index_builder_write_uint32 (builder, id_lists[i]);
+    }
+
+  g_free (strings);
+  g_free (id_lists);
+
+  g_print ("index for '%s': %d\n", locale, (gint) builder->string->len - offset);
+
+  return offset;
+}
+
 
 static void
 desktop_file_index_builder_serialise (DesktopFileIndexBuilder *builder)
@@ -266,22 +344,21 @@ desktop_file_index_builder_serialise (DesktopFileIndexBuilder *builder)
   /* Make room for the header */
   g_string_append_len (builder->string, (char *) header_fields, sizeof header_fields);
 
-  /* Write out the string table, filling in the offsets */
+  /* Write out the C string table, filling in the offsets
+   *
+   * We have to do this first because all of the string lists (apps,
+   * keys, locales, groups) are stored as strings in the C locale.
+   */
   {
-    GHashTableIter iter;
-    gpointer key;
+    GHashTable *c_table;
 
-    g_hash_table_iter_init (&iter, builder->string_table);
-    while (g_hash_table_iter_next (&iter, &key, NULL))
-      {
-        guint offset;
-
-        offset = desktop_file_index_builder_write_raw_string (builder, key);
-        g_hash_table_iter_replace (&iter, GUINT_TO_POINTER (offset));
-      }
+    c_table = desktop_file_index_builder_get_string_table (builder, NULL);
+    desktop_file_index_string_table_write (c_table, NULL, builder->string);
   }
 
-  /* Write out the string lists */
+  /* Write out the string lists.  This will work because they only
+   * refer to strings in the C locale.
+   */
   {
     header_fields[0] = desktop_file_index_builder_write_string_list (builder, builder->app_names);
     header_fields[1] = desktop_file_index_builder_write_string_list (builder, builder->key_names);
@@ -289,15 +366,48 @@ desktop_file_index_builder_serialise (DesktopFileIndexBuilder *builder)
     header_fields[3] = desktop_file_index_builder_write_string_list (builder, builder->group_names);
   }
 
+  /* Write out the text index for the C locale... */
+  {
+    desktop_file_index_builder_write_text_index (builder, NULL, builder->c_text_index);
+  }
+
   /* Write out the group implementors */
-  {
+  { if(0)
+    header_fields[4] = desktop_file_index_builder_write_pointer_array (builder,
+                                                                       builder->group_names,
+                                                                       header_fields[3],
+                                                                       builder->group_implementors,
+                                                                       desktop_file_index_builder_write_id_list);
   }
 
-  /* Write out the text indexes */
+  /* Write out the text indexes for the actual locales.
+   *
+   * Note: we do this by visiting each item in the locale string list,
+   * which doesn't include the C locale, so we won't end up emitting the
+   * C locale again here.
+   *
+   * Note: this function will write out the locale-specific string
+   * tables alongside the table for each locale in order to improve
+   * locality.
+   */
   {
+    header_fields[5] = desktop_file_index_builder_write_pointer_array (builder,
+                                                                       builder->locale_names,
+                                                                       header_fields[2],
+                                                                       builder->locale_text_indexes,
+                                                                       desktop_file_index_builder_write_text_index);
   }
 
-  /* Write out the desktop file contents */
+  /* Write out the desktop file contents.
+   *
+   * We have to do this last because the desktop files refer to strings
+   * from all the locales and those are only actually written in the
+   * last step.
+   *
+   * TODO: we could improve things a bit by storing the desktop files at
+   * the front of the cache, but this would require a two-pass
+   * approach...
+   */
   {
     header_fields[6] = desktop_file_index_builder_write_pointer_array (builder,
                                                                        builder->app_names,
@@ -308,64 +418,105 @@ desktop_file_index_builder_serialise (DesktopFileIndexBuilder *builder)
 
   /* Write out the mime types index */
   {
+    //header_fields[7] = desktop_file_index_builder_write_text_index (builder, NULL, builder->mime_types);
   }
 
   /* Replace the header */
-  memcpy (builder->string->str, header_fields, sizeof header_fields); /* TODO: byteswap */
+  {
+    guint32 *file = (guint32 *) builder->string->str;
+    gint i;
+
+    for (i = 0; i < G_N_ELEMENTS (header_fields); i++)
+      file[i] = GUINT32_TO_LE (header_fields[i]);
+  }
 }
 
 static void
-desktop_file_index_keyfile_group_free (gpointer data)
+desktop_file_index_builder_add_strings_for_keyfile (DesktopFileIndexBuilder *builder,
+                                                    DesktopFileIndexKeyfile *keyfile)
 {
-  DesktopFileIndexKeyfileGroup *group = data;
+  guint n_groups;
+  guint i;
 
-  g_free (group->name);
+  n_groups = desktop_file_index_keyfile_get_n_groups (keyfile);
 
-  g_slice_free (DesktopFileIndexKeyfileGroup, group);
-}
+  for (i = 0; i < n_groups; i++)
+    {
+      const gchar *group_name;
+      guint start, end;
+      guint j;
 
-static void
-desktop_file_index_keyfile_item_free (gpointer data)
-{
-  DesktopFileIndexKeyfileItem *item = data;
+      group_name = desktop_file_index_keyfile_get_group_name (keyfile, i);
+      desktop_file_index_keyfile_get_group_range (keyfile, i, &start, &end);
 
-  g_free (item->key);
-  g_free (item->locale);
-  g_free (item->value);
+      desktop_file_index_string_list_ensure (builder->group_names, group_name);
 
-  g_slice_free (DesktopFileIndexKeyfileItem, item);
-}
+      for (j = start; j < end; j++)
+        {
+          const gchar *key, *locale, *value;
 
-static void
-desktop_file_index_keyfile_free (gpointer data)
-{
-  DesktopFileIndexKeyfile *kf = data;
+          desktop_file_index_keyfile_get_item (keyfile, j, &key, &locale, &value);
 
-  g_ptr_array_free (kf->groups, TRUE);
-  g_ptr_array_free (kf->items, TRUE);
+          desktop_file_index_string_list_ensure (builder->key_names, key);
 
-  g_slice_free (DesktopFileIndexKeyfile, kf);
-}
+          if (locale)
+            desktop_file_index_string_list_ensure (builder->locale_names, locale);
 
-static void
-desktop_file_index_builder_intern (DesktopFileIndexBuilder *builder,
-                                   GHashTable              *id_table,
-                                   const gchar             *string)
-{
-  if (string == NULL)
-    return;
-
-  if (id_table)
-    g_hash_table_insert (id_table, g_strdup (string), NULL);
-
-  g_hash_table_insert (builder->string_table, g_strdup (string), NULL);
+          desktop_file_index_string_tables_add_string (builder->locale_string_tables, locale, value);
+        }
+    }
 }
 
 static void
 desktop_file_index_builder_add_strings (DesktopFileIndexBuilder *builder)
 {
   GHashTableIter keyfile_iter;
+  gpointer key, value;
+
+  builder->locale_string_tables = desktop_file_index_string_tables_create ();
+  builder->app_names = desktop_file_index_string_list_new ();
+  builder->key_names = desktop_file_index_string_list_new ();
+  builder->locale_names = desktop_file_index_string_list_new ();
+  builder->group_names = desktop_file_index_string_list_new ();
+
+  g_hash_table_iter_init (&keyfile_iter, builder->desktop_files);
+  while (g_hash_table_iter_next (&keyfile_iter, &key, &value))
+    {
+      DesktopFileIndexKeyfile *keyfile = value;
+      const gchar *app = key;
+
+      desktop_file_index_string_list_ensure (builder->app_names, app);
+      desktop_file_index_builder_add_strings_for_keyfile (builder, keyfile);
+    }
+
+  {
+    GHashTable *c_string_table;
+
+    c_string_table = desktop_file_index_string_tables_get_table (builder->locale_string_tables, NULL);
+
+    desktop_file_index_string_list_populate_strings (builder->app_names, c_string_table);
+    desktop_file_index_string_list_populate_strings (builder->group_names, c_string_table);
+    desktop_file_index_string_list_populate_strings (builder->key_names, c_string_table);
+    desktop_file_index_string_list_populate_strings (builder->locale_names, c_string_table);
+  }
+}
+
+static GSequence *
+desktop_file_index_builder_index_one_locale (DesktopFileIndexBuilder *builder,
+                                             const gchar             *locale)
+{
+  const gchar *fields[] = { "Name", "GenericName", "X-GNOME-FullName", "Common", "Keywords" };
+  gchar **locale_variants;
+  GHashTableIter keyfile_iter;
   gpointer key, val;
+  GSequence *text_index;
+
+  if (locale)
+    locale_variants = g_get_locale_variants (locale);
+  else
+    locale_variants = g_new0 (gchar *, 0 + 1);
+
+  text_index = desktop_file_index_text_index_new ();
 
   g_hash_table_iter_init (&keyfile_iter, builder->desktop_files);
   while (g_hash_table_iter_next (&keyfile_iter, &key, &val))
@@ -374,145 +525,54 @@ desktop_file_index_builder_add_strings (DesktopFileIndexBuilder *builder)
       const gchar *app = key;
       gint i;
 
-      // g_print ("app: %s\n", app);
-      desktop_file_index_builder_intern (builder, builder->app_names, app);
-
-      for (i = 0; i < kf->groups->len; i++)
+      for (i = 0; i < G_N_ELEMENTS (fields); i++)
         {
-          DesktopFileIndexKeyfileGroup *group = kf->groups->pdata[i];
-          gint end;
-          gint j;
+          const gchar *value;
 
-          if (i < kf->groups->len - 1)
-            end = ((DesktopFileIndexKeyfileGroup *) kf->groups->pdata[i + 1])->start;
-          else
-            end = kf->items->len;
+          value = desktop_file_index_keyfile_get_value (kf, (const gchar **) locale_variants, "Desktop Entry", fields[i]);
 
-          desktop_file_index_builder_intern (builder, builder->group_names, group->name);
-
-          // g_print ("[%s]\n", group->name);
-
-          for (j = group->start; j < end; j++)
+          if (value)
             {
-              DesktopFileIndexKeyfileItem *item = kf->items->pdata[j];
+              guint16 ids[3];
 
-              desktop_file_index_builder_intern (builder, builder->key_names, item->key);
-              desktop_file_index_builder_intern (builder, builder->locale_names, item->locale);
-              desktop_file_index_builder_intern (builder, NULL, item->value);
+              ids[0] = desktop_file_index_string_list_get_id (builder->app_names, app);
+              ids[1] = desktop_file_index_string_list_get_id (builder->group_names, "Desktop Entry");
+              ids[2] = desktop_file_index_string_list_get_id (builder->key_names, fields[i]);
 
-              // g_print ("%s[%s]=%s\n", item->key, item->locale, item->value);
+              desktop_file_index_text_index_add_ids_tokenised (text_index, value, ids, 3);
             }
         }
-
     }
+
+  g_free (locale_variants);
+
+  return text_index;
 }
 
-static DesktopFileIndexKeyfile *
-desktop_file_index_keyfile_new (const gchar  *filename,
-                                GError      **error)
+static void
+desktop_file_index_builder_index_strings (DesktopFileIndexBuilder *builder)
 {
-  DesktopFileIndexKeyfile *kf;
-  gchar *contents;
-  const gchar *c;
-  gsize length;
-  gint line = 1;
+  GHashTable *c_string_table;
+  GSequenceIter *iter;
 
-  if (!g_file_get_contents (filename, &contents, &length, error))
-    return NULL;
+  c_string_table = desktop_file_index_string_tables_get_table (builder->locale_string_tables, NULL);
+  builder->c_text_index = desktop_file_index_builder_index_one_locale (builder, NULL);
+  desktop_file_index_text_index_populate_strings (builder->c_text_index, c_string_table);
 
-  kf = g_slice_new (DesktopFileIndexKeyfile);
-  kf->groups = g_ptr_array_new_with_free_func (desktop_file_index_keyfile_group_free);
-  kf->items = g_ptr_array_new_with_free_func (desktop_file_index_keyfile_item_free);
+  builder->locale_text_indexes = g_hash_table_new_full (g_str_hash, g_str_equal, g_free,
+                                                        (GDestroyNotify) g_sequence_free);
 
-  c = contents;
-  while (*c)
+  foreach_sequence_item (iter, builder->locale_names)
     {
-      gint line_length;
+      const gchar *locale = g_sequence_get (iter);
+      GHashTable *string_table;
+      GSequence *text_index;
 
-      line_length = strcspn (c, "\n");
-
-      if (line_length == 0 || c[0] == '#')
-        /* looks like a comment */
-        ;
-
-      else if (c[0] == '[')
-        {
-          DesktopFileIndexKeyfileGroup *kfg;
-          gint group_size;
-
-          group_size = strcspn (c + 1, "]");
-          if (group_size != line_length - 2)
-            {
-              g_set_error (error, G_KEY_FILE_ERROR, G_KEY_FILE_ERROR_PARSE,
-                           "%s:%d: Invalid group line: ']' must be last character on line", filename, line);
-              goto err;
-            }
-
-          kfg = g_slice_new (DesktopFileIndexKeyfileGroup);
-
-          kfg->name = g_strndup (c + 1, group_size);
-          kfg->start = kf->items->len;
-
-          g_ptr_array_add (kf->groups, kfg);
-        }
-
-      else
-        {
-          DesktopFileIndexKeyfileItem *kfi;
-          gsize key_size;
-          const gchar *locale;
-          gsize locale_size;
-          const gchar *value;
-          gsize value_size;
-
-          key_size = strspn (c, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-");
-
-          if (key_size && c[key_size] == '[')
-            {
-              locale = c + key_size + 1;
-              locale_size = strspn (locale, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789@._");
-              if (locale_size == 0 || locale[locale_size] != ']' || locale[locale_size + 1] != '=')
-                {
-                  g_set_error (error, G_KEY_FILE_ERROR, G_KEY_FILE_ERROR_PARSE,
-                               "%s:%d: Keys containing '[' must then have a locale name, then ']='", filename, line);
-                  goto err;
-                }
-              value = locale + locale_size + 2;
-              value_size = line_length - locale_size - key_size - 3; /* [ ] = */
-            }
-          else if (key_size && c[key_size] == '=')
-            {
-              locale = NULL;
-              locale_size = 0;
-              value = c + key_size + 1;
-              value_size = line_length - key_size - 1; /* = */
-            }
-          else
-            {
-              g_set_error (error, G_KEY_FILE_ERROR, G_KEY_FILE_ERROR_PARSE,
-                           "%s:%d: Lines must either be empty, comments, groups or assignments", filename, line);
-              goto err;
-            }
-
-          kfi = g_slice_new (DesktopFileIndexKeyfileItem);
-          kfi->key = g_strndup (c, key_size);
-          kfi->locale = g_strndup (locale, locale_size);
-          kfi->value = g_strndup (value, value_size);
-
-          g_ptr_array_add (kf->items, kfi);
-        }
-
-      c += line_length + 1;
-      line++;
+      text_index = desktop_file_index_builder_index_one_locale (builder, locale);
+      g_hash_table_insert (builder->locale_text_indexes, g_strdup (locale), text_index);
+      string_table = desktop_file_index_string_tables_get_table (builder->locale_string_tables, locale);
+      desktop_file_index_text_index_populate_strings (text_index, string_table);
     }
-
-  return kf;
-
-err:
-  g_ptr_array_free (kf->groups, TRUE);
-  g_ptr_array_free (kf->items, TRUE);
-
-  return NULL;
 }
 
 static DesktopFileIndexBuilder *
@@ -520,13 +580,8 @@ desktop_file_index_builder_new (void)
 {
   DesktopFileIndexBuilder *builder;
 
-  builder = g_slice_new (DesktopFileIndexBuilder);
-  builder->string_table = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
-  builder->key_names = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
-  builder->group_names = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
-  builder->app_names = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
-  builder->locale_names = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
-  builder->desktop_files = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, desktop_file_index_keyfile_free);
+  builder = g_slice_new0 (DesktopFileIndexBuilder);
+  builder->desktop_files = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, (GDestroyNotify) desktop_file_index_keyfile_free);
   builder->string = NULL;
 
   return builder;
@@ -557,6 +612,8 @@ main (int argc, char **argv)
   const gchar *name;
   GDir *dir;
 
+  setlocale (LC_ALL, "");
+
   builder = desktop_file_index_builder_new ();
 
   dir = g_dir_open (argv[1], 0, &error);
@@ -581,6 +638,8 @@ main (int argc, char **argv)
   g_dir_close (dir);
 
   desktop_file_index_builder_add_strings (builder);
+
+  desktop_file_index_builder_index_strings (builder);
 
   desktop_file_index_builder_serialise (builder);
 
