@@ -1,6 +1,6 @@
 all: compile tool
 
-CFLAGS = `pkg-config --cflags --libs gtk+-3.0` -Wall -ggdb3
+CFLAGS = `pkg-config --cflags --libs gtk+-3.0` -Wall -ggdb3 -Os
 LDFLAGS = `pkg-config --libs gtk+-3.0`
 
 consume: consume.o tool.o

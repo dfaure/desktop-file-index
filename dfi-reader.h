@@ -23,10 +23,7 @@
 
 struct dfi_index;
 
-struct dfi_index *                      dfi_index_new                                   (gconstpointer                data,
-                                                                                         gsize                        size,
-                                                                                         GDestroyNotify               notify,
-                                                                                         gpointer                     notify_data);
+struct dfi_index *                      dfi_index_new                                   (const gchar *directory);
 
 void                                    dfi_index_free                                  (struct dfi_index            *index);
 

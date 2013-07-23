@@ -14,10 +14,10 @@ typedef struct
 {
   GHashTable *locale_string_tables;  /* string tables */
 
-  GSequence *key_names;              /* string list */
-  GSequence *group_names;            /* string list */
   GSequence *app_names;              /* string list */
+  GSequence *key_names;              /* string list */
   GSequence *locale_names;           /* string list */
+  GSequence *group_names;            /* string list */
 
   GSequence  *c_text_index;          /* text index */
   GSequence  *mime_types;            /* text index */
@@ -144,7 +144,7 @@ desktop_file_index_builder_write_string_list (DesktopFileIndexBuilder *builder,
   desktop_file_index_builder_write_uint16 (builder, 0xffff); /* padding */
 
   for (iter = g_sequence_get_begin_iter (strings); !g_sequence_iter_is_end (iter); iter = g_sequence_iter_next (iter))
-    desktop_file_index_builder_write_string (builder, NULL, g_sequence_get (iter));
+    desktop_file_index_builder_write_string (builder, "", g_sequence_get (iter));
 
   return offset;
 }
@@ -292,10 +292,8 @@ desktop_file_index_builder_write_text_index (DesktopFileIndexBuilder *builder,
     {
       GHashTable *c_string_table;
 
-      c_string_table = desktop_file_index_string_tables_get_table (builder->locale_string_tables, NULL);
-      guint start = builder->string->len;
+      c_string_table = desktop_file_index_string_tables_get_table (builder->locale_string_tables, "");
       desktop_file_index_string_table_write (string_table, c_string_table, builder->string);
-      g_print ("string table for '%s': %d\n", locale, (gint) builder->string->len - start);
     }
 
   n_items = g_sequence_get_length (text_index);
@@ -328,8 +326,6 @@ desktop_file_index_builder_write_text_index (DesktopFileIndexBuilder *builder,
   g_free (strings);
   g_free (id_lists);
 
-  g_print ("index for '%s': %d\n", locale, (gint) builder->string->len - offset);
-
   return offset;
 }
 
@@ -352,7 +348,7 @@ desktop_file_index_builder_serialise (DesktopFileIndexBuilder *builder)
   {
     GHashTable *c_table;
 
-    c_table = desktop_file_index_builder_get_string_table (builder, NULL);
+    c_table = desktop_file_index_builder_get_string_table (builder, "");
     desktop_file_index_string_table_write (c_table, NULL, builder->string);
   }
 
@@ -366,18 +362,15 @@ desktop_file_index_builder_serialise (DesktopFileIndexBuilder *builder)
     header_fields[3] = desktop_file_index_builder_write_string_list (builder, builder->group_names);
   }
 
-  /* Write out the text index for the C locale... */
-  {
-    desktop_file_index_builder_write_text_index (builder, NULL, builder->c_text_index);
-  }
-
   /* Write out the group implementors */
-  { if(0)
+  {
+    /*
     header_fields[4] = desktop_file_index_builder_write_pointer_array (builder,
                                                                        builder->group_names,
                                                                        header_fields[3],
                                                                        builder->group_implementors,
                                                                        desktop_file_index_builder_write_id_list);
+                                                                       */
   }
 
   /* Write out the text indexes for the actual locales.
@@ -492,7 +485,7 @@ desktop_file_index_builder_add_strings (DesktopFileIndexBuilder *builder)
   {
     GHashTable *c_string_table;
 
-    c_string_table = desktop_file_index_string_tables_get_table (builder->locale_string_tables, NULL);
+    c_string_table = desktop_file_index_string_tables_get_table (builder->locale_string_tables, "");
 
     desktop_file_index_string_list_populate_strings (builder->app_names, c_string_table);
     desktop_file_index_string_list_populate_strings (builder->group_names, c_string_table);
@@ -505,7 +498,7 @@ static GSequence *
 desktop_file_index_builder_index_one_locale (DesktopFileIndexBuilder *builder,
                                              const gchar             *locale)
 {
-  const gchar *fields[] = { "Name", "GenericName", "X-GNOME-FullName", "Common", "Keywords" };
+  const gchar *fields[] = { "Name", "GenericName", "X-GNOME-FullName", "Comment", "Keywords" };
   gchar **locale_variants;
   GHashTableIter keyfile_iter;
   gpointer key, val;
@@ -555,7 +548,7 @@ desktop_file_index_builder_index_strings (DesktopFileIndexBuilder *builder)
   GHashTable *c_string_table;
   GSequenceIter *iter;
 
-  c_string_table = desktop_file_index_string_tables_get_table (builder->locale_string_tables, NULL);
+  c_string_table = desktop_file_index_string_tables_get_table (builder->locale_string_tables, "");
   builder->c_text_index = desktop_file_index_builder_index_one_locale (builder, NULL);
   desktop_file_index_text_index_populate_strings (builder->c_text_index, c_string_table);
 

@@ -34,6 +34,7 @@ get_locale_group (const gchar *for_locale)
    */
 
   /* Untranslated strings... */
+  g_assert (for_locale);
   if (!for_locale)
     return NULL;
 
@@ -41,7 +42,7 @@ get_locale_group (const gchar *for_locale)
    * so avoid duplicating them.  Note: careful to avoid en@shaw.
    */
   if (g_str_equal (for_locale, "en") || g_str_has_prefix (for_locale, "en_"))
-    return NULL;
+    return g_strdup ("");
 
   /* Valencian is just a dialect of Catalan, so make sure they get
    * grouped together.
@@ -167,8 +168,8 @@ desktop_file_index_string_table_write (GHashTable *string_table,
 
       if (val == NULL)
         {
-          g_string_append_len (file, key, strlen (key) + 1);
           g_hash_table_iter_replace (&iter, GUINT_TO_POINTER (file->len));
+          g_string_append_len (file, key, strlen (key) + 1);
         }
       else
         g_hash_table_iter_replace (&iter, val);

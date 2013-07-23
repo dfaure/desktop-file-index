@@ -23,11 +23,15 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/fcntl.h>
+#include <unistd.h>
 
 /* struct dfi_index struct {{{1 */
 struct dfi_index
 {
-  const char                   *data;
+  gchar                        *data;
   guint32                       file_size;
 
   const struct dfi_string_list *app_names;
@@ -40,9 +44,6 @@ struct dfi_index
   const struct dfi_pointer_array            *desktop_files;   /* desktop files, associated with app_names */
 
   const struct dfi_text_index  *mime_types;
-
-  GDestroyNotify                notify;
-  gpointer                      notify_data;
 };
 
 /* dfi_uint16, dfi_uint32 {{{1 */
@@ -523,27 +524,82 @@ dfi_header_get (const struct dfi_index *dfi)
 void
 dfi_index_free (struct dfi_index *dfi)
 {
-  if (dfi->notify)
-    (* dfi->notify) (dfi->notify_data);
-
+  munmap (dfi->data, dfi->file_size);
   free (dfi);
 }
 
+static gpointer
+dfi_index_map_file (const gchar *directory,
+                    guint32     *size)
+{
+  struct stat dir_buf, file_buf;
+  gpointer mapping = NULL;
+  gint file_fd = -1;
+  gint dir_fd = -1;
+
+  dir_fd = open (directory, O_DIRECTORY);
+  if (dir_fd < 0)
+    goto out;
+
+  if (fstat (dir_fd, &dir_buf) < 0)
+    goto out;
+
+  file_fd = openat (dir_fd, "index.cache", O_RDONLY);
+
+  if (file_fd < 0)
+    goto out;
+
+  if (fstat (file_fd, &file_buf) < 0)
+    goto out;
+
+  if (file_buf.st_size > G_MAXUINT32)
+    goto out;
+
+  //if (file_buf.st_mtime < dir_buf.st_mtime)
+    //goto out;
+
+  //if (dir_buf.st_nlink != 2)
+    //goto out;
+
+  mapping = mmap (NULL, file_buf.st_size, PROT_READ, MAP_SHARED, file_fd, 0);
+
+  if (mapping == MAP_FAILED)
+    {
+      mapping = NULL;
+      goto out;
+    }
+
+  madvise (mapping, file_buf.st_size, MADV_RANDOM);
+
+out:
+  if (file_fd != -1)
+    close (file_fd);
+
+  if (dir_fd != -1)
+    close (dir_fd);
+
+  if (mapping)
+    *size = file_buf.st_size;
+
+  return mapping;
+}
 
 struct dfi_index *
-dfi_index_new (gconstpointer  data,
-               gsize          size,
-               GDestroyNotify notify,
-               gpointer       notify_data)
+dfi_index_new (const gchar *directory)
 {
   const struct dfi_header *header;
   struct dfi_index *dfi;
+  gpointer data;
+  guint32 size;
+
+  data = dfi_index_map_file (directory, &size);
+
+  if (data == NULL)
+    return NULL;
 
   dfi = malloc (sizeof (struct dfi_index));
   dfi->data = data;
   dfi->file_size = size;
-  dfi->notify = notify;
-  dfi->notify_data = notify_data;
 
   if (dfi->file_size > G_MAXINT)
     goto err;
@@ -572,6 +628,7 @@ dfi_index_new (gconstpointer  data,
 
 err:
   dfi_index_free (dfi);
+
   return NULL;
 }
 
@@ -603,6 +660,12 @@ const struct dfi_string_list *
 dfi_index_get_group_names (const struct dfi_index *dfi)
 {
   return dfi->group_names;
+}
+
+const struct dfi_pointer_array *
+dfi_index_get_text_indexes (const struct dfi_index *dfi)
+{
+  return dfi->text_indexes;
 }
 
 /* Epilogue {{{1 */

@@ -248,7 +248,7 @@ desktop_file_index_keyfile_new (const gchar  *filename,
             }
           else if (key_size && c[key_size] == '=')
             {
-              locale = NULL;
+              locale = "";
               locale_size = 0;
               value = c + key_size + 1;
               value_size = line_length - key_size - 1; /* = */
