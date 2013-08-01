@@ -166,7 +166,7 @@ desktop_file_index_keyfile_get_value (DesktopFileIndexKeyfile *keyfile,
     {
       DesktopFileIndexKeyfileItem *item = keyfile->items->pdata[i];
 
-      if (item->locale == NULL && g_str_equal (item->key, key))
+      if (item->locale[0] == '\0' && g_str_equal (item->key, key))
         return item->value;
     }
 

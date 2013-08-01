@@ -549,7 +549,7 @@ desktop_file_index_builder_index_strings (DesktopFileIndexBuilder *builder)
   GSequenceIter *iter;
 
   c_string_table = desktop_file_index_string_tables_get_table (builder->locale_string_tables, "");
-  builder->c_text_index = desktop_file_index_builder_index_one_locale (builder, NULL);
+  builder->c_text_index = desktop_file_index_builder_index_one_locale (builder, "");
   desktop_file_index_text_index_populate_strings (builder->c_text_index, c_string_table);
 
   builder->locale_text_indexes = g_hash_table_new_full (g_str_hash, g_str_equal, g_free,
